@@ -136,4 +136,176 @@ class DualMarkerLandingSystem:
         frame = cv2.resize(frame, self.camera_config['resolution'])
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        corners, ids, _ = aruco
+        corners, ids, _ = aruco.detectMarkers(gray, self.aruco_dict, parameters=self.parameters)
+        
+        if ids is None:
+            return None, None, None
+            
+        active_config = self.get_active_marker_config()
+        marker_id = active_config['id']
+        marker_size = active_config['size']
+        
+        # Find the correct marker in detected markers
+        for idx, detected_id in enumerate(ids):
+            if detected_id == marker_id:
+                marker_corners = [corners[idx]]
+                
+                # Estimate pose
+                ret = aruco.estimatePoseSingleMarkers(
+                    marker_corners, marker_size,
+                    self.camera_matrix, self.camera_distortion
+                )
+                rvec, tvec = ret[0][0, 0, :], ret[1][0, 0, :]
+                
+                # Calculate center point
+                corner_array = np.array(marker_corners[0][0])
+                center_x = np.mean(corner_array[:, 0])
+                center_y = np.mean(corner_array[:, 1])
+                
+                # Calculate angles
+                x_angle = (center_x - self.camera_config['resolution'][0]/2) * \
+                         (self.camera_config['horizontal_fov']/self.camera_config['resolution'][0])
+                y_angle = (center_y - self.camera_config['resolution'][1]/2) * \
+                         (self.camera_config['vertical_fov']/self.camera_config['resolution'][1])
+                
+                return x_angle, y_angle, tvec[2]
+        
+        return None, None, None
+
+    def send_landing_target(self, x_angle: float, y_angle: float) -> None:
+        """
+        Send landing target message to drone
+        
+        Args:
+            x_angle (float): Angle to target in x-axis
+            y_angle (float): Angle to target in y-axis
+        """
+        msg = self.vehicle.message_factory.landing_target_encode(
+            0,  # time since system boot
+            0,  # target num
+            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            x_angle,
+            y_angle,
+            0,  # distance to target
+            0,  # Target x-axis size
+            0   # Target y-axis size
+        )
+        self.vehicle.send_mavlink(msg)
+        self.vehicle.flush()
+
+    def arm_and_takeoff(self, target_height: float) -> None:
+        """
+        Arm the drone and take off to specified height
+        
+        Args:
+            target_height (float): Target altitude in meters
+        """
+        print("Starting takeoff sequence...")
+        
+        # Check if vehicle is armable
+        while not self.vehicle.is_armable:
+            print("Waiting for vehicle to become armable...")
+            time.sleep(1)
+        print("Vehicle is now armable")
+
+        # Switch to GUIDED mode
+        self.vehicle.mode = VehicleMode("GUIDED")
+        while self.vehicle.mode != 'GUIDED':
+            print("Waiting for GUIDED mode...")
+            time.sleep(1)
+        print("Vehicle now in GUIDED mode")
+
+        # Arm the vehicle
+        self.vehicle.armed = True
+        while not self.vehicle.armed:
+            print("Waiting for arming...")
+            time.sleep(1)
+        print("Vehicle armed")
+
+        # Take off
+        self.vehicle.simple_takeoff(target_height)
+        while True:
+            altitude = self.vehicle.location.global_relative_frame.alt
+            print(f"Current Altitude: {altitude:.1f}m")
+            if altitude >= target_height * 0.95:
+                print("Reached target altitude")
+                break
+            time.sleep(1)
+
+    def run_landing_sequence(self) -> None:
+        """Execute the precision landing sequence"""
+        print("Starting precision landing sequence...")
+        
+        if self.metrics['first_run']:
+            self.metrics['start_time'] = time.time()
+            self.metrics['first_run'] = False
+
+        try:
+            while self.vehicle.armed:
+                # Ensure we're in LAND mode
+                if self.vehicle.mode != 'LAND':
+                    self.vehicle.mode = VehicleMode("LAND")
+                    while self.vehicle.mode != 'LAND':
+                        print("Switching to LAND mode...")
+                        time.sleep(1)
+                    print("Vehicle now in LAND mode")
+
+                # Get active marker configuration
+                active_config = self.get_active_marker_config()
+                print(f"Tracking marker {active_config['id']} ({active_config['size']}cm)")
+
+                # Detect marker and get landing target
+                x_angle, y_angle, distance = self.detect_marker()
+
+                if x_angle is not None:
+                    self.send_landing_target(x_angle, y_angle)
+                    self.metrics['found_count'] += 1
+                    print(f"Target found - Distance: {distance:.2f}m")
+                    print(f"Angles (deg) - X: {math.degrees(x_angle):.1f}, Y: {math.degrees(y_angle):.1f}")
+                else:
+                    self.metrics['notfound_count'] += 1
+                    print("Target not found")
+
+                time.sleep(0.1)  # Control loop rate
+
+        except Exception as e:
+            print(f"Error during landing sequence: {str(e)}")
+        finally:
+            self._print_landing_statistics()
+
+    def _print_landing_statistics(self) -> None:
+        """Print the landing performance statistics"""
+        total_time = time.time() - self.metrics['start_time']
+        total_frames = self.metrics['found_count'] + self.metrics['notfound_count']
+        
+        print("\nLanding Statistics:")
+        print(f"Total time: {total_time:.1f} seconds")
+        print(f"Total frames processed: {total_frames}")
+        print(f"Detection rate: {(self.metrics['found_count']/total_frames)*100:.1f}%")
+        print(f"Average FPS: {total_frames/total_time:.1f}")
+        print(f"Successful detections: {self.metrics['found_count']}")
+        print(f"Failed detections: {self.metrics['notfound_count']}")
+
+def main():
+    """Main execution function"""
+    try:
+        # Initialize landing system
+        landing_system = DualMarkerLandingSystem()
+        print("Dual marker precision landing system initialized")
+        
+        # Take off
+        landing_system.arm_and_takeoff(landing_system.takeoff_height)
+        
+        # Execute landing sequence
+        landing_system.run_landing_sequence()
+        
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+    finally:
+        if 'landing_system' in locals():
+            landing_system.cap.stop()
+            landing_system.vehicle.close()
+            print("Systems shutdown complete")
+
+if __name__ == '__main__':
+    main()
