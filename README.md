@@ -169,26 +169,29 @@ pip install -r requirements.txt
 
 ### 1. Basic Testing
 ```bash
-# Test drone connectivity
-python arm_test.py
+# Test drone arming and basic controls
+python khairul_test_arm.py
 
-# Test servo mechanism
-python control_servo.py
+# Test servo mechanism for taco delivery
+python servo_control.py
+
+# Test basic takeoff and landing
+python takeoff_and_land.py
 ```
 
 ### 2. Precision Landing Test
 ```bash
-# Single marker test
+# Single marker precision landing test
 python precision_landing_single_aruco.py
 
-# Dual marker test
+# Dual marker precision landing test
 python precision_landing_double_aruco.py
 ```
 
 ### 3. Complete Delivery Mission
 ```bash
-# Update coordinates in taco_delivery.py
-python taco_delivery.py
+# Update coordinates in autonomous_taco_delivery.py
+python autonomous_taco_delivery.py
 ```
 
 ## Safety Features
